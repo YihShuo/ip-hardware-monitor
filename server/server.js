@@ -1,4 +1,3 @@
-// server.js
 const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
@@ -14,6 +13,41 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 app.use(express.static("public"));
+
+// Polyfill pLimit: simple limiter factory
+function pLimitFactory(concurrency) {
+  if (!concurrency || concurrency <= 0) concurrency = 50;
+  let activeCount = 0;
+  const queue = [];
+
+  const next = () => {
+    if (queue.length === 0) return;
+    if (activeCount >= concurrency) return;
+    activeCount++;
+    const { fn, resolve, reject } = queue.shift();
+    Promise.resolve()
+      .then(fn)
+      .then((val) => {
+        resolve(val);
+        activeCount--;
+        next();
+      })
+      .catch((err) => {
+        reject(err);
+        activeCount--;
+        next();
+      });
+  };
+
+  return (fn) =>
+    new Promise((resolve, reject) => {
+      queue.push({ fn, resolve, reject });
+      next();
+    });
+}
+
+// cấu hình concurrency mặc định (tùy chỉnh bằng env IP_CONCURRENCY)
+const DEFAULT_IP_CONCURRENCY = parseInt(process.env.IP_CONCURRENCY, 10) || 50;
 
 // ========= Upload (multer) =========
 const upload = multer({
@@ -34,46 +68,47 @@ const upload = multer({
   }
 });
 
-// =============== HÀM PING KIỂM TRA ONLINE =================
-async function checkHost(ip) {
+// ===================== HÀM KIỂM TRA HOST =====================
+async function checkHost(ip, timeoutSeconds = 2) {
   try {
-    const res = await ping.promise.probe(ip, { timeout: 2 });
-    if (res.alive) return true;
-    // nếu ping không được, thử connect vài cổng
+    const res = await ping.promise.probe(ip, { timeout: timeoutSeconds, min_reply: 1 });
+    if (res && res.alive) return true;
+
     const ports = [80, 443, 3389];
-    for (let p of ports) {
-      const ok = await new Promise(resolve => {
-        const socket = new net.Socket();
-        socket.setTimeout(1000);
-        socket.once("connect", () => { socket.destroy(); resolve(true); });
-        socket.once("timeout", () => { socket.destroy(); resolve(false); });
-        socket.once("error", () => { resolve(false); });
-        socket.connect(p, ip);
-      });
-      if (ok) return true;
-    }
-    return false;
+    const checks = ports.map(p => checkHostPort(ip, p, 800));
+    const settled = await Promise.allSettled(checks);
+    return settled.some(s => s.status === "fulfilled" && s.value === true);
   } catch (e) {
     return false;
   }
 }
 
-// =============== HÀM CHECK IP + PORT =================
-async function checkHostPort(ip, port, timeout = 1500) {
+function checkHostPort(ip, port, timeout = 1200) {
   return new Promise(resolve => {
     const socket = new net.Socket();
-    let status = false;
+    let done = false;
     socket.setTimeout(timeout);
-    socket.once("connect", () => { status = true; socket.destroy(); });
-    socket.once("timeout", () => socket.destroy());
-    socket.once("error", () => { status = false; });
-    socket.once("close", () => resolve(status));
+
+    socket.once("connect", () => {
+      done = true;
+      socket.destroy();
+      resolve(true);
+    });
+
+    socket.once("timeout", () => {
+      if (!done) { done = true; socket.destroy(); resolve(false); }
+    });
+
+    socket.once("error", () => {
+      if (!done) { done = true; resolve(false); }
+    });
+
     socket.connect(port, ip);
   });
 }
 
-// =========================================================
-// 🔹 LOGIN
+// ===================== ROUTES =====================
+
 app.post("/api/login", async (req, res) => {
   const { userid, pwd } = req.body;
   try {
@@ -97,8 +132,6 @@ app.post("/api/login", async (req, res) => {
   }
 });
 
-// =========================================================
-// 🔹 DEVICES CRUD
 app.get("/api/devices", async (req, res) => {
   try {
     const pool = await poolWEB;
@@ -181,11 +214,14 @@ app.delete("/api/devices/:id", async (req, res) => {
   }
 });
 
-// =========================================================
-// 🔹 DISCOVER
+// ===================== DISCOVER (TỐI ƯU HOÁ) =====================
 app.post("/api/discover", async (req, res) => {
   try {
-    const { range } = req.body;
+    const { range, concurrency } = req.body || {};
+    const ipConcurrency = parseInt(concurrency, 10) || DEFAULT_IP_CONCURRENCY;
+    // use local limiter
+    const limit = (fn) => pLimitFactory(ipConcurrency)(fn);
+
     const pool = await poolWEB;
     const devices = [];
 
@@ -194,18 +230,27 @@ app.post("/api/discover", async (req, res) => {
         SELECT TOP (1000) [id], [name], [type], [ip], [dep], [note], [status], [port], [date], [userid], [link]
         FROM devices
       `);
-      const checks = result.recordset.map(async d => {
+      const checks = result.recordset.map(d => limit(async () => {
         let alive = false;
-        if (d.port && d.port > 0) alive = await checkHostPort(d.ip, d.port);
-        else alive = await checkHost(d.ip);
-
-        await pool.request()
-          .input("id", sql.Int, d.id)
-          .input("status", sql.Int, alive ? 1 : 0)
-          .query("UPDATE devices SET status=@status WHERE id=@id");
-
+        try {
+          if (d.port && d.port > 0) alive = await checkHostPort(d.ip, d.port);
+          else alive = await checkHost(d.ip);
+        } catch (e) {
+          alive = false;
+        }
+        try {
+          if ((d.status ? 1 : 0) !== (alive ? 1 : 0)) {
+            await pool.request()
+              .input("id", sql.Int, d.id)
+              .input("status", sql.Int, alive ? 1 : 0)
+              .query("UPDATE devices SET status=@status WHERE id=@id");
+          }
+        } catch (e) {
+          console.error("Update status error:", e);
+        }
         return { ...d, status: alive ? 1 : 0 };
-      });
+      }));
+
       const updated = await Promise.all(checks);
       devices.push(...updated);
     } else {
@@ -224,7 +269,7 @@ app.post("/api/discover", async (req, res) => {
       const tasks = [];
       for (let i = start; i <= end; i++) {
         const ipAddr = `${prefix}.${i}`;
-        tasks.push((async () => {
+        tasks.push(limit(async () => {
           const alive = await checkHost(ipAddr);
           const dbCheck = await pool.request().input("ip", sql.NVarChar, ipAddr).query("SELECT TOP 1 * FROM devices WHERE ip=@ip");
           if (dbCheck.recordset.length > 0) {
@@ -244,8 +289,9 @@ app.post("/api/discover", async (req, res) => {
               link: null
             };
           }
-        })());
+        }));
       }
+
       const results = await Promise.all(tasks);
       devices.push(...results);
     }
@@ -257,33 +303,25 @@ app.post("/api/discover", async (req, res) => {
   }
 });
 
-// =========================================================
-// 🔹 EXPORT EXCEL (theo thứ tự cột yêu cầu, IP và Port tách riêng)
+// Export / Import Excel (giữ nguyên như trước)
 app.get("/api/devices/export", async (req, res) => {
   try {
-    // Query từ client: type, q, status, sortField, sortAsc
     const { type = "all", q = "", status = "all", sortField = "name", sortAsc = "1" } = req.query;
-
     const pool = await poolWEB;
     const rs = await pool.request().query("SELECT * FROM devices");
     let list = rs.recordset;
 
-    // Lọc loại
     if (type === "other") {
       list = list.filter(d => !["server", "wifi", "printer", "att", "andong", "website"].includes(d.type));
     } else if (type !== "all") {
       list = list.filter(d => d.type === type);
     }
 
-    // Tìm kiếm
     const qq = q.trim().toLowerCase();
     if (qq) list = list.filter(d => (d.name || "").toLowerCase().includes(qq) || (d.ip || "").includes(qq));
-
-    // Lọc trạng thái
     if (status === "online") list = list.filter(d => d.status);
     if (status === "offline") list = list.filter(d => !d.status);
 
-    // Sắp xếp
     if (sortField) {
       const asc = sortAsc === "1";
       list.sort((a, b) => {
@@ -297,7 +335,6 @@ app.get("/api/devices/export", async (req, res) => {
       });
     }
 
-    // Tạo Excel theo đúng thứ tự cột như UI (IP và Port tách riêng)
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet("Devices");
 
@@ -325,7 +362,6 @@ app.get("/api/devices/export", async (req, res) => {
       });
     });
 
-    // Style đầu bảng
     ws.getRow(1).font = { bold: true };
 
     res.setHeader("Content-Type",
@@ -340,8 +376,6 @@ app.get("/api/devices/export", async (req, res) => {
   }
 });
 
-// =========================================================
-// 🔹 IMPORT EXCEL (chỉ thêm mới, không update, lưu được link)
 app.post("/api/devices/import", upload.single("file"), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ success: false, message: "Không có file upload" });
@@ -358,14 +392,11 @@ app.post("/api/devices/import", upload.single("file"), async (req, res) => {
     const cleanHeader = txt =>
       String(txt || "").replace(/[▲▼\n\r\t]/g, "").trim().toLowerCase();
 
-    // Map header (hàng đầu tiên)
     const headerTextByCol = {};
     ws.getRow(1).eachCell((cell, colNumber) => {
       headerTextByCol[colNumber] = cleanHeader(cell.value);
     });
-    console.log("📑 Header Excel đọc được:", headerTextByCol);
 
-    // Các từ khóa nhận diện cột
     const detectors = {
       status: ["trạng trạng", "trạng thái", "status", "tình trạng"],
       name: ["tên thiết bị", "ten thiet bi", "name", "device", "thiết bị", "tên"],
@@ -377,7 +408,6 @@ app.post("/api/devices/import", upload.single("file"), async (req, res) => {
       link: ["link", "url", "hyperlink", "đường dẫn", "lien ket", "duong dan"]
     };
 
-    // Xác định cột nào ứng với field nào
     const colFor = {};
     for (const [colNum, txt] of Object.entries(headerTextByCol)) {
       for (const [field, keys] of Object.entries(detectors)) {
@@ -388,7 +418,6 @@ app.post("/api/devices/import", upload.single("file"), async (req, res) => {
       }
     }
 
-    // Bắt buộc phải có 2 cột này
     if (!colFor.name || !colFor.ip) {
       throw new Error("Excel phải có cột 'Tên thiết bị' và 'IP'");
     }
@@ -396,17 +425,14 @@ app.post("/api/devices/import", upload.single("file"), async (req, res) => {
     const pool = await poolWEB;
     let inserted = 0, skipped = 0;
 
-    // Lặp từng dòng (bắt đầu từ dòng 2)
     for (let r = 2; r <= ws.rowCount; r++) {
       const row = ws.getRow(r);
-
-      // helper lấy giá trị cell (xử lý hyperlink)
       const getVal = c => {
         if (!c) return "";
         const v = row.getCell(c).value;
         if (!v) return "";
         if (typeof v === "object" && v.hyperlink) {
-          return v.hyperlink; // hyperlink Excel
+          return v.hyperlink;
         }
         return v.toString().trim();
       };
@@ -427,10 +453,9 @@ app.post("/api/devices/import", upload.single("file"), async (req, res) => {
       const type = getVal(colFor.type);
       const dep = getVal(colFor.dep);
       const note = getVal(colFor.note);
-      const link = getVal(colFor.link);   // ✅ lấy link
+      const link = getVal(colFor.link);
       const status = colFor.status ? (String(getVal(colFor.status)).toLowerCase().includes("online") ? 1 : 0) : 0;
 
-      // Check trùng IP
       const check = await pool.request().input("ip", sql.NVarChar, ip)
         .query("SELECT TOP 1 id FROM devices WHERE ip=@ip");
 
@@ -467,5 +492,5 @@ app.post("/api/devices/import", upload.single("file"), async (req, res) => {
 // =========================================================
 app.listen(5501, () => {
   console.log("🚀 Server chạy tại http://localhost:5501");
-  console.log("🚀 Server LAN: http://192.168.71.106:5501");
+  console.log("🚀 Server LAN: http://192.168.71.9:5501");
 });

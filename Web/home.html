@@ -2,9 +2,10 @@
 <html lang="vi">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=0.5, maximum-scale=3.0, user-scalable=yes">
+
   <title>Quản lý IP cố định</title>
-  <link rel="icon" type="image/png" href="../Web/assets/lai_yih_logo.png">
+  <link rel="icon" type="image/png" href="../Web/assets/LogoYS.png">
   <link rel="stylesheet" href="style.css">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
 </head>
@@ -12,20 +13,23 @@
 <div class="wrap">
   <header>
     <div style="display:flex;align-items:center;gap:10px">
-      <button id="menuToggle" class="menu-btn" aria-label="Mở menu">☰</button>
+      <!-- menu icon -->
+      <button id="menuToggle" class="menu-btn" aria-label="Mở menu">
+        <i class="fas fa-bars"></i>
+      </button>
       <div>
         <h1 onclick="logout()" style="cursor:pointer">Quản lý IP cố định</h1>
         <div class="sub mobile-hide">Quản lý: server, wifi, máy in, máy chấm công — IP online hiển thị đèn xanh</div>
       </div>
     </div>
      <div class="controls">
-      <button id="addBtn" class="primary">+ Thêm thiết bị</button>
+      <button id="addBtn" class="primary"><i class="fas fa-plus"></i> Thêm thiết bị</button>
       <span class="demo-badge">Mode: On</span>
-      <button id="scanBtn" class="primary menu-scan">Quét mạng (Scan)</button>
-      <button id="autoBtn" class="primary mobile-hide">Bật auto-refresh</button>
-      <button id="exportBtn" class="alt-btn mobile-hide">Xuất Excel</button>
+      <button id="scanBtn" class="primary menu-scan"> Quét mạng</button>
+      <button id="autoBtn" class="primary mobile-hide"><i class="fas fa-sync-alt"></i> Auto-refresh</button>
+      <button id="exportBtn" class="alt-btn mobile-hide"><i class="fas fa-file-export"></i> Xuất Excel</button>
       <input type="file" id="importFile" accept=".xlsx,.xls" style="display:none" />
-      <button id="importBtn" class="alt-btn mobile-hide">Nhập Excel</button>
+      <button id="importBtn" class="alt-btn mobile-hide"><i class="fas fa-file-import"></i> Nhập Excel</button>
     </div>
   </header>
 
@@ -34,7 +38,9 @@
     <aside id="sidebar" class="card sidebar">
       <div style="display:flex;justify-content:space-between;align-items:center">
         <h3 class="sidebar-title">Bộ lọc & Tìm kiếm</h3>
-        <button class="close-sidebar" id="closeSidebarBtn" aria-label="Đóng menu">✕</button>
+        <button class="close-sidebar" id="closeSidebarBtn" aria-label="Đóng menu">
+          <i class="fas fa-times"></i>
+        </button>
       </div>
 
       <label>Lọc theo loại</label>
@@ -80,10 +86,8 @@
     <main class="card">
       <!-- Desktop-only range input -->
       <div class="scan-range desktop-only" style="display:flex;align-items:center;justify-content:space-between;gap:10px">
-   
           <div class="sub">Phạm vi quét (ví dụ: 192.168.78.1-254)</div>
           <input id="rangeInputDesktop" type="text" placeholder="192.168.78.1-254" style="max-width:260px"/>
-       
           <div style="flex:1"></div>
         <!-- Auto status always on right -->
         <div class="sub">Auto: <span id="autoState">Tắt</span></div>
@@ -93,12 +97,12 @@
         <table>
           <thead>
           <tr>
-            <th class="col-small" onclick="sortTable('status')">Trạng thái ▲▼</th>
-            <th class="col-small" onclick="sortTable('name')">Tên thiết bị ▲▼</th>
-            <th class="col-small" onclick="sortTable('type')">Loại ▲▼</th>
-            <th class="col-small" onclick="sortTable('ip')">IP ▲▼</th>
-            <th class="col-small" onclick="sortTable('dep')">Đơn vị ▲▼</th>
-            <th class="col-small" onclick="sortTable('note')">Ghi chú ▲▼</th>
+            <th class="col-small" onclick="sortTable('status')">Trạng thái <i class="fas fa-sort"></i></th>
+            <th class="col-small" onclick="sortTable('name')">Tên thiết bị <i class="fas fa-sort"></i></th>
+            <th class="col-small" onclick="sortTable('type')">Loại <i class="fas fa-sort"></i></th>
+            <th class="col-small" onclick="sortTable('ip')">IP <i class="fas fa-sort"></i></th>
+            <th class="col-small" onclick="sortTable('dep')">Đơn vị <i class="fas fa-sort"></i></th>
+            <th class="col-small" onclick="sortTable('note')">Ghi chú <i class="fas fa-sort"></i></th>
             <th class="col-small">Link</th>
             <th class="col-small">Chỉnh sửa</th>
           </tr>

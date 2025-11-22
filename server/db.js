@@ -4,8 +4,8 @@ const sql = require("mssql");
 // Kết nối DB WEB_IP
 const configWEB = {
   user: "sa",
-  password: "Qweasd@123",
-  server: "192.168.71.111",
+  password: "IT@Admin17",
+  server: "192.168.71.5",
   database: "WEB_IP",
   options: {
     encrypt: false,

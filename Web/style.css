@@ -169,7 +169,7 @@ th{color:var(--muted);font-size:13px}
 }
 
 /* Responsive cho điện thoại */
-@media (max-width: 768px) {
+@media (max-width: 1080px) {
   .grid{
     grid-template-columns: 1fr; /* Sidebar và main chồng lên nhau */
   }
@@ -334,7 +334,7 @@ button.alt-btn:hover {
 .col-small { font-size: 13px; }
 
 /* Responsive tweaks for mobile */
-@media (max-width: 768px) {
+@media (max-width: 1080px) {
   .menu-btn { display: inline-block; }
   .mobile-hide { display: none !important; }
 
@@ -391,7 +391,7 @@ button.alt-btn:hover {
 
 /* Mobile-only and desktop-only */
 .mobile-only { display: none; }
-@media (max-width: 768px) {
+@media (max-width: 1080px) {
   .mobile-only { display: block; }
   .desktop-only { display: none !important; }
   td.status-text {
@@ -402,23 +402,66 @@ button.alt-btn:hover {
   .status-text { display: inline-block; margin-left:6px; color:var(--muted); font-size:13px; }
 }
 /* --- Fix giao diện mobile nằm ngang --- */
-@media screen and (max-width: 768px) and (orientation: landscape) {
-  header h1 {
-    font-size: 16px;
+/* Mobile từ 6.1" đến 6.83" nằm ngang */
+@media screen and (min-width: 640px) and (max-width: 1080px) and (orientation: landscape) {
+  header {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
   }
 
-  .actions button,
-  .actions select,
-  #menuToggle {
-    font-size: 12px;
-    padding: 4px 6px;
-    min-width: 60px;
+  h1 { font-size: 15px; }
+  .sub { font-size: 11px; }
+
+  .controls {
+    flex-wrap: wrap;
+    gap: 4px;
   }
 
+  button, select, input {
+    font-size: 12px !important;
+    padding: 4px 6px !important;
+    min-width: 60px;     /* đảm bảo nút không bị quá nhỏ */
+  }
+
+  table { min-width: 580px; }
   table th, table td {
-    font-size: 12px;
+    font-size: 11px;
     padding: 4px;
   }
 }
 
+}
+
+/* =================== EXTRA FIX FOR 6.1–6.83 inch phones in landscape =================== */
+@media screen and (min-width: 640px) and (max-width: 1080px) and (orientation: landscape) {
+  header {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+  }
+
+  h1 { font-size: 15px; }
+  .sub { font-size: 11px; }
+
+  .controls {
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  button, select, input {
+    font-size: 12px !important;
+    padding: 4px 6px !important;
+    min-width: 60px;
+  }
+
+  table { min-width: 580px; }
+  table th, table td {
+    font-size: 11px;
+    padding: 4px;
+  }
 }

@@ -1,4 +1,5 @@
-const API_BASE = "http://192.168.71.106:5501"; // sửa nếu cần
+
+const API_BASE = "http://192.168.71.9:5501"; // sửa nếu cần
 let devices = [];
 let addingRow = false;
 let editingId = null;
@@ -22,24 +23,41 @@ const autoState = document.getElementById('autoState');
 const exportBtn = document.getElementById('exportBtn');
 const importBtn = document.getElementById('importBtn');
 const importFile = document.getElementById('importFile');
+// new: concurrency input (optional). Create an <input id="concurrencyInput"> in your HTML near scan controls.
+const concurrencyInput = document.getElementById('concurrencyInput');
 
-// --- Kiểm tra user trong localStorage ngay khi vào ---
+// --- Kiểm tra user ---
 const user = localStorage.getItem("user");
 if (!user) {
   window.location.href = "login.html";
 } else {
-  // Chỉ loadDevices nếu đã đăng nhập
   loadDevices();
 }
 
-// --- helpers ---
+// --- Helpers ---
 function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, function(m) {
-    return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[m];
-  });
+  return String(s).replace(/[&<>"']/g, m =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[m]
+  );
 }
-function escapeAttr(s) {
-  return String(s).replace(/'/g, "\\'");
+function escapeAttr(s) { return String(s).replace(/'/g, "\\'"); }
+
+// --- Probe client ---
+function probeHostViaImage(ip, port = 80, timeout = 2000) {
+  return new Promise(resolve => {
+    try {
+      const img = new Image();
+      let done = false;
+      const scheme = port === 443 ? "https" : "http";
+      const url = `${scheme}://${ip}:${port}/favicon.ico?_=${Date.now()}`;
+      const timer = setTimeout(() => {
+        if (!done) { done = true; img.src = ""; resolve(false); }
+      }, timeout);
+      img.onload = () => { if (!done) { done = true; clearTimeout(timer); resolve(true); } };
+      img.onerror = () => { if (!done) { done = true; clearTimeout(timer); resolve(false); } };
+      img.src = url;
+    } catch (e) { resolve(false); }
+  });
 }
 
 // --- Load devices ---
@@ -54,21 +72,12 @@ async function loadDevices() {
   }
 }
 
-// Render status cell (mobile: hide text)
-function renderStatusCell(device){
-  const dot = `<span class="dot" style="background:${device.status?'var(--online)':'var(--offline)'}"></span>`;
-  const text = `<span class="status-text">${device.status ? 'Online' : 'Offline'}</span>`;
-  return dot + text;
+// --- Render ---
+function renderStatusCell(device) {
+  return `
+    <span class="dot" style="background:${device.status ? 'var(--online)' : 'var(--offline)'}"></span>
+    <span class="status-text">${device.status ? 'Online' : 'Offline'}</span>`;
 }
-
-// Sorting handler
-function sortTable(field) {
-  if (sortField === field) sortAsc = !sortAsc;
-  else { sortField = field; sortAsc = true; }
-  render();
-}
-
-// Get type badge class
 function getTypeColorClass(type) {
   switch (type) {
     case 'server': return 'type-server';
@@ -80,15 +89,14 @@ function getTypeColorClass(type) {
     default: return 'type-other';
   }
 }
-
-function openLink(url) {
-  if (!url) return;
-  window.open(url, "_blank");
+function sortTable(field) {
+  if (sortField === field) sortAsc = !sortAsc;
+  else { sortField = field; sortAsc = true; }
+  render();
 }
 
-// Main render
 async function render(filterStatus = null, forceScan = false, preserveStats = false) {
-  let list = Array.isArray(devices) ? devices.slice() : [];
+  let list = devices.slice();
 
   const type = typeFilter?.value || 'all';
   const q = searchInput?.value.trim().toLowerCase() || '';
@@ -98,36 +106,27 @@ async function render(filterStatus = null, forceScan = false, preserveStats = fa
     onlineCountEl.textContent = 0;
     offlineCountEl.textContent = 0;
     await discoverNetwork(false);
-    list = Array.isArray(devices) ? devices.slice() : [];
+    list = devices.slice();
   }
 
-  // Filter type
   if (type !== 'all') {
-    if (type === 'other') {
+    if (type === 'other')
       list = list.filter(d => !['server','wifi','printer','att','andong','website'].includes(d.type));
-    } else {
-      list = list.filter(d => d.type === type);
-    }
+    else list = list.filter(d => d.type === type);
   }
-
-  // Tìm kiếm 
   if (q) {
-    const keyword = q.toLowerCase();
-    list = list.filter(d => 
-      (d.name || "").toLowerCase().includes(keyword) ||
-      (d.ip || "").toLowerCase().includes(keyword) ||
-      (d.dep || "").toLowerCase().includes(keyword)
+    list = list.filter(d =>
+      (d.name || "").toLowerCase().includes(q) ||
+      (d.ip || "").toLowerCase().includes(q) ||
+      (d.dep || "").toLowerCase().includes(q)
     );
   }
-  // filter by status
   if (filterStatus === 'online') list = list.filter(d => d.status);
   if (filterStatus === 'offline') list = list.filter(d => !d.status);
 
-  // sort
   if (sortField) {
-    list.sort((a, b) => {
-      let v1 = a[sortField] ?? '';
-      let v2 = b[sortField] ?? '';
+    list.sort((a,b)=>{
+      let v1 = a[sortField] ?? '', v2 = b[sortField] ?? '';
       if (typeof v1 === 'string') v1 = v1.toLowerCase();
       if (typeof v2 === 'string') v2 = v2.toLowerCase();
       if (v1 < v2) return sortAsc ? -1 : 1;
@@ -135,7 +134,6 @@ async function render(filterStatus = null, forceScan = false, preserveStats = fa
       return 0;
     });
   }
-
   deviceBody.innerHTML = '';
 
   // adding row
@@ -214,6 +212,7 @@ async function render(filterStatus = null, forceScan = false, preserveStats = fa
       `;
       deviceBody.appendChild(tr);
     }
+    
     return;
   }
 
@@ -337,20 +336,16 @@ searchInput.addEventListener('input', () => render());
 // scan button
 scanBtn.addEventListener('click', ()=>discoverNetwork());
 
-// auto refresh
+// --- Auto refresh ---
 autoBtn.addEventListener('click', ()=>{
   autoRefresh = !autoRefresh;
   autoBtn.textContent = autoRefresh ? 'Tắt auto-refresh' : 'Bật auto-refresh';
   autoState.textContent = autoRefresh ? 'Bật' : 'Tắt';
-
   if (autoRefresh) {
     if (autoIntervalId) clearInterval(autoIntervalId);
-    autoIntervalId = setInterval(()=> {
-      if (!autoRefresh) { clearInterval(autoIntervalId); autoIntervalId = null; return; }
-      discoverNetwork();
-    }, 15000);
+    autoIntervalId = setInterval(()=>discoverNetwork(true), 15000);
   } else {
-    if (autoIntervalId) { clearInterval(autoIntervalId); autoIntervalId = null; }
+    clearInterval(autoIntervalId); autoIntervalId = null;
   }
 });
 
@@ -395,18 +390,29 @@ importFile.addEventListener('change', async e=>{
   }
 });
 
-// discover network
+// --- Discover ---
+// Now sends optional concurrency parameter to backend to control parallelism
 async function discoverNetwork(autoRender=true){
   const range = (rangeInputSidebar?.value || rangeInputDesktop?.value || '').trim();
   const overlay = document.getElementById("loadingOverlay");
+
+  // read concurrency from input if available and valid
+  let concurrency = undefined;
+  if (concurrencyInput) {
+    const v = parseInt(concurrencyInput.value, 10);
+    if (!Number.isNaN(v) && v > 0) concurrency = v;
+  }
 
   scanBtn.textContent='Đang quét...';
   scanBtn.disabled=true;
   overlay.style.display = "flex";
 
   try{
+    const body = { range };
+    if (concurrency) body.concurrency = concurrency;
+
     const resp = await fetch(`${API_BASE}/api/discover`, {
-      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({range})
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)
     });
     if (!resp.ok) throw new Error(await resp.text());
     devices = await resp.json();
@@ -470,13 +476,7 @@ function closeSidebar() {
   overlay.classList.remove("show");
   document.body.classList.remove('sidebar-open');
 }
-menuToggle?.addEventListener('click', () => {
-  sidebar.classList.add('open');
-});
 
-closeSidebarBtn?.addEventListener('click', () => {
-  sidebar.classList.remove('open');
-});
+function openLink(url){ if(url) window.open(url,"_blank"); }
+function logout(){ localStorage.removeItem("user"); window.location.href="login.html"; }
 
-// initial load
-loadDevices();
