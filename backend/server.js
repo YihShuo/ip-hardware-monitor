@@ -7,7 +7,7 @@ const multer = require("multer");
 const ExcelJS = require("exceljs");
 const path = require("path");
 const fs = require("fs");
-const { sql, poolWEB, poolLogin } = require("./db"); // giữ như cũ
+const { sql, poolWEB, poolLogin } = require("./db");
 
 const app = express();
 app.use(cors());
@@ -16,7 +16,7 @@ app.use(express.static("public"));
 
 // Polyfill pLimit: simple limiter factory
 function pLimitFactory(concurrency) {
-  if (!concurrency || concurrency <= 0) concurrency = 50;
+  if (!concurrency || concurrency <= 0) concurrency = 200;
   let activeCount = 0;
   const queue = [];
 
@@ -46,8 +46,8 @@ function pLimitFactory(concurrency) {
     });
 }
 
-// cấu hình concurrency mặc định (tùy chỉnh bằng env IP_CONCURRENCY)
-const DEFAULT_IP_CONCURRENCY = parseInt(process.env.IP_CONCURRENCY, 10) || 50;
+// Concurrency 200 cho cân bằng tốc độ và độ chính xác
+const DEFAULT_IP_CONCURRENCY = parseInt(process.env.IP_CONCURRENCY, 10) || 200;
 
 // ========= Upload (multer) =========
 const upload = multer({
@@ -68,42 +68,79 @@ const upload = multer({
   }
 });
 
-// ===================== HÀM KIỂM TRA HOST =====================
-async function checkHost(ip, timeoutSeconds = 2) {
+// ===================== HÀM KIỂM TRA HOST (CÂN BẰNG TỐC ĐỘ & ĐỘ CHÍNH XÁC) =====================
+async function checkHost(ip, timeoutMs = 400) {
   try {
-    const res = await ping.promise.probe(ip, { timeout: timeoutSeconds, min_reply: 1 });
-    if (res && res.alive) return true;
-
-    const ports = [80, 443, 3389];
-    const checks = ports.map(p => checkHostPort(ip, p, 800));
-    const settled = await Promise.allSettled(checks);
-    return settled.some(s => s.status === "fulfilled" && s.value === true);
+    // Chiến lược: Check port trước (nhanh), rồi mới ping
+    // Vì port check nhanh hơn ping rất nhiều
+    
+    // 1. Thử check các port phổ biến song song
+    const portChecks = [
+      checkHostPort(ip, 80, timeoutMs),   // HTTP
+      checkHostPort(ip, 443, timeoutMs),  // HTTPS
+      checkHostPort(ip, 3389, timeoutMs)  // RDP
+    ];
+    
+    // Race: port nào respond trước thì return luôn
+    const portResult = await Promise.race([
+      Promise.any(portChecks).then(() => true).catch(() => false),
+      new Promise(resolve => setTimeout(() => resolve(false), timeoutMs))
+    ]);
+    
+    if (portResult) return true;
+    
+    // 2. Nếu không có port nào mở, thử ping (cho các thiết bị không có service)
+    const pingResult = await ping.promise.probe(ip, { 
+      timeout: 0.6,  // 600ms cho ping
+      min_reply: 1 
+    });
+    
+    return pingResult && pingResult.alive;
   } catch (e) {
     return false;
   }
 }
 
-function checkHostPort(ip, port, timeout = 1200) {
-  return new Promise(resolve => {
+function checkHostPort(ip, port, timeout = 400) {
+  return new Promise((resolve, reject) => {
     const socket = new net.Socket();
     let done = false;
+    
     socket.setTimeout(timeout);
+    socket.setNoDelay(true);
 
     socket.once("connect", () => {
-      done = true;
-      socket.destroy();
-      resolve(true);
+      if (!done) {
+        done = true;
+        socket.destroy();
+        resolve(true);
+      }
     });
 
     socket.once("timeout", () => {
-      if (!done) { done = true; socket.destroy(); resolve(false); }
+      if (!done) {
+        done = true;
+        socket.destroy();
+        reject(new Error('timeout'));
+      }
     });
 
     socket.once("error", () => {
-      if (!done) { done = true; resolve(false); }
+      if (!done) {
+        done = true;
+        socket.destroy();
+        reject(new Error('error'));
+      }
     });
 
-    socket.connect(port, ip);
+    try {
+      socket.connect(port, ip);
+    } catch (e) {
+      if (!done) {
+        done = true;
+        reject(e);
+      }
+    }
   });
 }
 
@@ -214,64 +251,103 @@ app.delete("/api/devices/:id", async (req, res) => {
   }
 });
 
-// ===================== DISCOVER (TỐI ƯU HOÁ) =====================
+// ===================== DISCOVER (CÂN BẰNG TỐC ĐỘ & ĐỘ CHÍNH XÁC) =====================
 app.post("/api/discover", async (req, res) => {
   try {
     const { range, concurrency } = req.body || {};
     const ipConcurrency = parseInt(concurrency, 10) || DEFAULT_IP_CONCURRENCY;
-    // use local limiter
-    const limit = (fn) => pLimitFactory(ipConcurrency)(fn);
+    const limit = pLimitFactory(ipConcurrency);
 
     const pool = await poolWEB;
     const devices = [];
 
+    console.log(`🔍 Bắt đầu quét với concurrency: ${ipConcurrency}`);
+    const startTime = Date.now();
+
     if (!range || range.trim() === "") {
+      // Quét tất cả devices trong DB
       const result = await pool.request().query(`
         SELECT TOP (1000) [id], [name], [type], [ip], [dep], [note], [status], [port], [date], [userid], [link]
         FROM devices
       `);
+      
+      // Map để lưu trạng thái cần update
+      const statusUpdates = new Map();
+      
       const checks = result.recordset.map(d => limit(async () => {
         let alive = false;
         try {
-          if (d.port && d.port > 0) alive = await checkHostPort(d.ip, d.port);
-          else alive = await checkHost(d.ip);
+          if (d.port && d.port > 0) {
+            // Nếu có port cụ thể, check port đó
+            alive = await checkHostPort(d.ip, d.port, 400);
+          } else {
+            // Không có port thì check đầy đủ (ports + ping)
+            alive = await checkHost(d.ip, 400);
+          }
         } catch (e) {
           alive = false;
         }
-        try {
-          if ((d.status ? 1 : 0) !== (alive ? 1 : 0)) {
-            await pool.request()
-              .input("id", sql.Int, d.id)
-              .input("status", sql.Int, alive ? 1 : 0)
-              .query("UPDATE devices SET status=@status WHERE id=@id");
-          }
-        } catch (e) {
-          console.error("Update status error:", e);
+        
+        // Lưu vào Map để batch update
+        const newStatus = alive ? 1 : 0;
+        if ((d.status ? 1 : 0) !== newStatus) {
+          statusUpdates.set(d.id, newStatus);
         }
-        return { ...d, status: alive ? 1 : 0 };
+        
+        return { ...d, status: newStatus };
       }));
 
       const updated = await Promise.all(checks);
       devices.push(...updated);
+      
+      // Batch update DB - fire and forget
+      if (statusUpdates.size > 0) {
+        setImmediate(async () => {
+          const updateStart = Date.now();
+          try {
+            const updatePromises = [];
+            for (const [id, status] of statusUpdates.entries()) {
+              updatePromises.push(
+                pool.request()
+                  .input("id", sql.Int, id)
+                  .input("status", sql.Int, status)
+                  .query("UPDATE devices SET status=@status WHERE id=@id")
+                  .catch(e => console.error(`Update error for ID ${id}:`, e.message))
+              );
+            }
+            await Promise.all(updatePromises);
+            const updateTime = ((Date.now() - updateStart) / 1000).toFixed(2);
+            console.log(`📝 Đã cập nhật ${statusUpdates.size} devices vào DB trong ${updateTime}s`);
+          } catch (e) {
+            console.error("Batch update error:", e);
+          }
+        });
+      }
     } else {
+      // Quét range IP
       const parts = range.split(".");
       if (parts.length !== 4) throw new Error("Range không hợp lệ");
       const prefix = parts.slice(0, 3).join(".");
       const last = parts[3];
       let start, end;
+      
       if (last.includes("-")) {
         [start, end] = last.split("-").map(v => parseInt(v, 10));
       } else {
         start = end = parseInt(last, 10);
       }
+      
       if (Number.isNaN(start) || Number.isNaN(end)) throw new Error("Range không hợp lệ");
 
       const tasks = [];
       for (let i = start; i <= end; i++) {
         const ipAddr = `${prefix}.${i}`;
         tasks.push(limit(async () => {
-          const alive = await checkHost(ipAddr);
-          const dbCheck = await pool.request().input("ip", sql.NVarChar, ipAddr).query("SELECT TOP 1 * FROM devices WHERE ip=@ip");
+          const alive = await checkHost(ipAddr, 400);
+          const dbCheck = await pool.request()
+            .input("ip", sql.NVarChar, ipAddr)
+            .query("SELECT TOP 1 * FROM devices WHERE ip=@ip");
+            
           if (dbCheck.recordset.length > 0) {
             return { ...dbCheck.recordset[0], status: alive ? 1 : 0 };
           } else {
@@ -296,6 +372,11 @@ app.post("/api/discover", async (req, res) => {
       devices.push(...results);
     }
 
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
+    const speed = (devices.length / elapsed).toFixed(0);
+    const online = devices.filter(d => d.status).length;
+    console.log(`✅ Quét xong ${devices.length} IPs trong ${elapsed}s (${speed} IPs/s) - ${online} online`);
+
     res.json(devices);
   } catch (err) {
     console.error("❌ Discover error:", err);
@@ -303,7 +384,7 @@ app.post("/api/discover", async (req, res) => {
   }
 });
 
-// Export / Import Excel (giữ nguyên như trước)
+// ===================== EXPORT EXCEL =====================
 app.get("/api/devices/export", async (req, res) => {
   try {
     const { type = "all", q = "", status = "all", sortField = "name", sortAsc = "1" } = req.query;
@@ -376,6 +457,7 @@ app.get("/api/devices/export", async (req, res) => {
   }
 });
 
+// ===================== IMPORT EXCEL =====================
 app.post("/api/devices/import", upload.single("file"), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ success: false, message: "Không có file upload" });
@@ -489,8 +571,10 @@ app.post("/api/devices/import", upload.single("file"), async (req, res) => {
   }
 });
 
-// =========================================================
-app.listen(5501, () => {
-  console.log("🚀 Server chạy tại http://localhost:5501");
-  console.log("🚀 Server LAN: http://192.168.71.9:5501");
+// ===================== START SERVER =====================
+app.listen(5601, () => {
+  console.log("🚀 Server chạy tại http://localhost:5601");
+  console.log("🚀 Server LAN: http://192.168.71.106:5601");
+  console.log(`⚡ IP Concurrency: ${DEFAULT_IP_CONCURRENCY}`);
+  console.log(`⚡ Chiến lược: Check 3 ports (80,443,3389) + Ping fallback - Timeout: 400ms`);
 });
